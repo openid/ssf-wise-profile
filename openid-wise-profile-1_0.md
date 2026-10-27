@@ -7,7 +7,7 @@ wg: OpenID Shared Signals
 
 docname: openid-wise-profile-1_0
 
-title: "OpenID WISE Profile Specification 1.0 - draft 03"
+title: "OpenID WISE Profile Specification 1.0 - draft 04"
 abbrev: wiseset
 lang: en
 kw:
@@ -276,7 +276,7 @@ credential types are included to enable security event signaling for
 environments operating heterogeneous credential ecosystems or
 transitioning toward WIMSE-compliant infrastructure.
 
-Proof-of-possession credentials bind a key to the workload identity: a WIT carries the public key in its `cnf` claim, and the corresponding private key is used to produce Workload Proof Tokens (WPT) {{WPT}}. WISE does not define separate events for the lifecycle of such keys. Because a bound key has no value once its credential is revoked, a compromised or rotated key is signaled through the credential events in this section: revoke the affected credential (with `reason` set to `key_compromise` where applicable) and, where a replacement is issued, emit `credential-rotated` or `credential-issued`.
+Proof-of-possession credentials bind a key to the workload identity: a WIT carries the public key in its `cnf` claim, and the corresponding private key is used to produce Workload Proof Tokens (WPT) {{WPT}}. WISE does not define separate events for the lifecycle of such keys. Because a bound key has no value once its credential is revoked, a compromised key is signaled by revoking the affected credential with `reason` set to `key_compromise` where applicable. An attempted credential rotation or renewal is signaled through `credential-rotated`, with `status` indicating whether the attempt succeeded or failed; where a replacement is issued outside a rotation, emit `credential-issued`.
 
 ### credential-issued
 
@@ -337,16 +337,28 @@ The following example is non-normative.
 
 Event Type URI: `https://schemas.openid.net/secevent/wise/event-type/credential-rotated`
 
-The `credential-rotated` event signals that a workload's credential was rotated. A new credential replaces the previous one.
+The `credential-rotated` event reports the outcome of an attempt to rotate or renew a workload credential. The REQUIRED `status` claim indicates whether the attempt succeeded or failed. When `status` is `succeeded`, a new credential replaces the previous credential. When `status` is `failed`, no replacement was issued, and the current credential may remain usable until its natural expiry.
 
 Attributes:
 
-- **credential_type** - REQUIRED. The type of credential rotated. Same values as in {{credential-issued}}.
-- **previous_credential_id** - OPTIONAL. Identifier of the credential being replaced.
-- **new_credential_id** - OPTIONAL. Identifier of the newly issued credential.
-- **grace_period_end** - OPTIONAL. The time until which the previous credential remains valid. JSON number (NumericDate).
+- **credential_type** - REQUIRED. The type of credential involved in the rotation attempt. Same values as in {{credential-issued}}.
+- **status** - REQUIRED. A JSON string indicating the outcome of the rotation attempt. Possible values:
+    - `succeeded` - A replacement credential was issued.
+    - `failed` - The credential could not be rotated or renewed.
+- **previous_credential_id** - OPTIONAL. Identifier of the credential that was replaced. This claim MAY be included only when `status` is `succeeded` and MUST be omitted when `status` is `failed`.
+- **new_credential_id** - OPTIONAL. Identifier of the newly issued replacement credential. This claim MAY be included only when `status` is `succeeded` and MUST be omitted when `status` is `failed`.
+- **grace_period_end** - OPTIONAL. The time until which the replaced credential remains valid, as a NumericDate. This claim MAY be included only when `status` is `succeeded` and MUST be omitted when `status` is `failed`.
+- **credential_id** - OPTIONAL. Identifier of the current credential that could not be rotated or renewed. This claim MAY be included only when `status` is `failed` and MUST be omitted when `status` is `succeeded`.
+- **current_expiry** - OPTIONAL. The natural expiration of the current credential, as a NumericDate. This claim MAY be included only when `status` is `failed` and MUST be omitted when `status` is `succeeded`.
+- **failure_reason** - OPTIONAL. Why the rotation or renewal attempt failed. This claim MAY be included only when `status` is `failed` and MUST be omitted when `status` is `succeeded`. Possible values:
+    - `credential_service_unreachable` - The Credential Service could not be reached (Section 3.2.1 of {{WIMSE-ARCH}}).
+    - `posture_evaluation_failed` - The workload did not pass posture evaluation.
+    - `policy_denied` - Issuance policy denied the rotation or renewal.
+    - `internal_error` - An internal error occurred in the provisioning pipeline.
 
-The following example is non-normative.
+A failed rotation caused by posture evaluation is distinct from `posture-evaluated` with `result` set to `failed`, which reports the posture decision as a security signal in its own right. When posture evaluation causes the rotation to fail, a Transmitter emits `credential-rotated` with `status` set to `failed` and `failure_reason` set to `posture_evaluation_failed`, and MAY also emit `posture-evaluated` with `result` set to `failed`. When both events arise from the same occurrence, the Transmitter SHOULD set the same `txn` claim value on both SETs (see {{correlating-related-events}}).
+
+The following examples are non-normative.
 
 ~~~ json
 {
@@ -361,6 +373,7 @@ The following example is non-normative.
   "events": {
     "https://schemas.openid.net/secevent/wise/event-type/credential-rotated": {
       "credential_type": "wit",
+      "status": "succeeded",
       "previous_credential_id": "jti:wit-2024-q4-001",
       "new_credential_id": "jti:wit-2024-q4-002",
       "grace_period_end": 1700003600,
@@ -369,7 +382,32 @@ The following example is non-normative.
   }
 }
 ~~~
-{: #fig-credential-rotated title="Example: Credential Rotated"}
+{: #fig-credential-rotated-succeeded title="Example: Credential Rotated (Succeeded)"}
+
+~~~ json
+{
+  "iss": "https://authority.example.com/",
+  "jti": "wise-evt-005",
+  "iat": 1700000000,
+  "aud": "https://rp.partner.example.net/wise",
+  "txn": "wise-txn-005",
+  "sub_id": {
+    "format": "uri",
+    "uri": "wimse://trust.example.com/workload/payment-service"
+  },
+  "events": {
+    "https://schemas.openid.net/secevent/wise/event-type/credential-rotated": {
+      "credential_type": "wit",
+      "status": "failed",
+      "credential_id": "jti:wit-2024-q4-001",
+      "current_expiry": 1700003600,
+      "failure_reason": "posture_evaluation_failed",
+      "event_timestamp": 1700000000
+    }
+  }
+}
+~~~
+{: #fig-credential-rotated-failed title="Example: Credential Rotated (Failed)"}
 
 ### credential-revoked
 
@@ -449,54 +487,11 @@ The following example is non-normative.
 ~~~
 {: #fig-credential-compromised title="Example: Credential Compromised"}
 
-### credential-renewal-failure
-
-Event Type URI: `https://schemas.openid.net/secevent/wise/event-type/credential-renewal-failure`
-
-The `credential-renewal-failure` event signals that the credential provisioning pipeline failed to renew a workload's credential. In the WIMSE model, credentials are intentionally short-lived to force regular posture evaluation before re-issuance. Under normal operation, renewal happens automatically. This event indicates that the renewal process has failed, and the workload may lose its ability to authenticate once the current credential expires.
-
-This event reports the operational outcome of a failed renewal, which can have several causes (see `failure_reason` below) — the Credential Service being unreachable, a policy denial, an internal error, or a failed posture evaluation. It is distinct from `posture-evaluation-failed`, which reports a posture failure as a security signal in its own right. Failed posture evaluation is only one possible cause of a renewal failure, and a renewal failure is only one possible consequence of a posture failure. When a renewal fails specifically because of posture evaluation, a Transmitter emits `credential-renewal-failure` with `failure_reason` `posture_evaluation_failed` and MAY also emit `posture-evaluation-failed`, correlated using the `txn` claim (see {{correlating-related-events}}).
-
-Attributes:
-
-- **credential_type** - REQUIRED. The type of credential that failed to renew.
-- **credential_id** - OPTIONAL. Identifier of the credential that was not renewed.
-- **current_expiry** - OPTIONAL. Expiration of the current (last valid) credential. JSON number (NumericDate).
-- **failure_reason** - OPTIONAL. Why renewal failed. Possible values:
-    - `credential_service_unreachable` - Cannot reach the Credential Service (Section 3.2.1 of {{WIMSE-ARCH}}).
-    - `posture_evaluation_failed` - The workload did not pass posture evaluation.
-    - `policy_denied` - Issuance policy denied renewal.
-    - `internal_error` - Internal error in the provisioning pipeline.
-
-The following example is non-normative.
-
-~~~ json
-{
-  "iss": "https://authority.example.com/",
-  "jti": "wise-evt-005",
-  "iat": 1700000000,
-  "aud": "https://rp.partner.example.net/wise",
-  "sub_id": {
-    "format": "uri",
-    "uri": "wimse://trust.example.com/workload/payment-service"
-  },
-  "events": {
-    "https://schemas.openid.net/secevent/wise/event-type/credential-renewal-failure": {
-      "credential_type": "wit",
-      "current_expiry": 1700003600,
-      "failure_reason": "posture_evaluation_failed",
-      "event_timestamp": 1700000000
-    }
-  }
-}
-~~~
-{: #fig-credential-renewal-failure title="Example: Credential Renewal Failure"}
-
 ## Workload Lifecycle Events
 
 These events signal changes to the lifecycle state of a workload as managed by the trust domain authority.
 
-Each of these events conveys only the lifecycle state change; the corresponding credential effect is carried by a separate companion event (`credential-revoked` or `credential-issued`), correlated using the `txn` claim as described in {{correlating-related-events}}.
+These events convey workload lifecycle and graduated trust-level state changes. When a change has a corresponding credential effect, that effect is carried by a separate companion event (`credential-revoked` or `credential-issued`), correlated using the `txn` claim as described in {{correlating-related-events}}.
 
 ### workload-disabled
 
@@ -538,7 +533,7 @@ The following example is non-normative.
 
 Event Type URI: `https://schemas.openid.net/secevent/wise/event-type/workload-enabled`
 
-The `workload-enabled` event signals that a previously disabled workload is active again. The trust domain authority will resume issuing credentials for this workload. As with disablement, this event conveys only the lifecycle state change; any credential provisioned as a result is signaled separately through an accompanying `credential-issued` event.
+The `workload-enabled` event signals that a workload entered the active state. This includes a newly instantiated or started workload and a workload re-enabled after being disabled. A Receiver MUST NOT assume that the workload was previously disabled. The trust domain authority can begin or resume issuing credentials for the workload. This event conveys only the lifecycle state change; any credential provisioned as a result is signaled separately through an accompanying `credential-issued` event.
 
 Attributes:
 
@@ -564,31 +559,40 @@ The following example is non-normative.
 ~~~
 {: #fig-workload-enabled title="Example: Workload Enabled"}
 
-### workload-degraded
+### workload-trust-level-change
 
-Event Type URI: `https://schemas.openid.net/secevent/wise/event-type/workload-degraded`
+Event Type URI: `https://schemas.openid.net/secevent/wise/event-type/workload-trust-level-change`
 
-The `workload-degraded` event signals that the trust domain authority has intentionally reduced a workload's trust level without suspending or purging it, so the workload can keep operating with fewer privileges. This supports adaptive resilience: gracefully degrading a workload (for example, revoking database write access or enforcing network quarantine) rather than executing a catastrophic shutdown during an active threat or compliance drift.
+The `workload-trust-level-change` event signals that the trust domain authority changed the graduated trust level of an operational workload without disabling or purging it. It covers movement to a lower trust level and movement to a higher trust level, including restoration to `full` trust.
 
-This event is advisory. It conveys a reduced trust level; each Receiver maps that level to concrete privilege changes according to its own policy. WISE does not prescribe the enforcement actions a Receiver takes.
+This event is advisory. It conveys the authority's trust decision; each Receiver maps the reported level to concrete privilege changes according to its own policy. WISE does not prescribe the enforcement actions a Receiver takes.
 
 Attributes:
 
-- **trust_level** - REQUIRED. The workload's current trust level after degradation, on a coarse graduated scale (from highest to lowest):
+- **trust_level** - REQUIRED. The workload's current trust level after the change, on a coarse graduated scale from highest to lowest:
+    - `full` - No trust-based restriction is represented by this graduated signal.
     - `reduced` - Minor reduction; most privileges retained.
     - `restricted` - Significant reduction; only limited operations should be permitted.
-    - `minimal` - Near-zero trust; only essential operations should be permitted, short of full suspension.
-- **previous_trust_level** - OPTIONAL. The trust level before this change, using the same scale, plus `full` for a workload previously at full trust. If omitted, the Receiver MUST NOT assume a particular prior level.
-- **reason** - OPTIONAL. Why the workload was degraded. Possible values:
-    - `anomaly_detected` - Anomalous behavior was observed for the workload.
+    - `minimal` - Near-zero trust; only essential operations should be permitted, short of suspension.
+- **previous_trust_level** - REQUIRED. The workload's trust level before the change. Possible values are `full`, `reduced`, `restricted`, and `minimal`, with the same meanings as for `trust_level`, plus:
+    - `unknown` - The Transmitter cannot provide the previous trust level.
+
+  The Transmitter MUST use `unknown` when it cannot provide the previous trust level. A Receiver that receives `unknown` MUST NOT infer a specific previous level or the direction of the change. When `previous_trust_level` is not `unknown`, it MUST differ from `trust_level`.
+- **reason** - OPTIONAL. Why the workload's trust level changed. Possible values:
+    - `anomaly_detected` - Anomalous behavior prompted a reduction in trust.
     - `policy_drift` - The workload drifted from its required policy or configuration.
     - `missing_provenance` - Required provenance was missing or could not be verified.
     - `posture_degraded` - Posture evaluation indicated a degraded but non-failing state.
     - `compliance_drift` - The workload drifted from a compliance requirement.
+    - `remediated` - The condition that caused a lower trust level was remediated.
+    - `posture_restored` - Posture evaluation returned to a satisfactory state.
+    - `administrative` - The trust level was changed by an administrator.
 
-This event is complementary to, and does not overlap with, the related runtime and lifecycle events. `anomalous-behavior-detected` reports an observation (something unusual was seen) and is purely advisory; `workload-degraded` reports a decision by the authority to reduce trust, which may follow such an observation. `workload-compromised` and `workload-disabled` represent the fully-untrusted end of the range — a believed compromise or a suspension — whereas `workload-degraded` keeps the workload operational at a reduced trust level between full trust and suspension. A workload returns to full trust through `workload-restored`.
+  When the direction of the change is known, the Transmitter SHOULD choose a reason consistent with that direction. A Receiver MUST NOT infer the direction of a change solely from `reason` when `previous_trust_level` is `unknown`.
 
-The following example is non-normative.
+This event is complementary to related runtime and lifecycle events. `anomalous-behavior-detected` reports an observation, while `workload-trust-level-change` reports an authority decision that may follow such an observation. A `minimal` trust level keeps the workload operational and is not a substitute for `workload-disabled`. A `full` trust level does not re-enable a disabled workload or clear a prior `workload-compromised` signal.
+
+The following examples are non-normative.
 
 ~~~ json
 {
@@ -601,7 +605,7 @@ The following example is non-normative.
     "uri": "wimse://trust.example.com/workload/payment-service"
   },
   "events": {
-    "https://schemas.openid.net/secevent/wise/event-type/workload-degraded": {
+    "https://schemas.openid.net/secevent/wise/event-type/workload-trust-level-change": {
       "trust_level": "restricted",
       "previous_trust_level": "full",
       "reason": "anomaly_detected",
@@ -610,23 +614,7 @@ The following example is non-normative.
   }
 }
 ~~~
-{: #fig-workload-degraded title="Example: Workload Degraded"}
-
-### workload-restored
-
-Event Type URI: `https://schemas.openid.net/secevent/wise/event-type/workload-restored`
-
-The `workload-restored` event signals that a previously degraded workload has been returned to full trust. It is the reverse of `workload-degraded`. Like `workload-degraded`, it is advisory: Receivers restore privileges according to their own policy.
-
-Attributes:
-
-- **previous_trust_level** - OPTIONAL. The trust level the workload held before restoration (`reduced`, `restricted`, or `minimal`), using the scale defined for `workload-degraded`.
-- **reason** - OPTIONAL. Why trust was restored. Possible values:
-    - `remediated` - The condition that caused degradation was remediated.
-    - `posture_restored` - Posture evaluation returned to a satisfactory state.
-    - `administrative` - Restored by an administrator.
-
-The following example is non-normative.
+{: #fig-workload-trust-level-change-degradation title="Example: Workload Trust Level Change (Degradation)"}
 
 ~~~ json
 {
@@ -639,7 +627,8 @@ The following example is non-normative.
     "uri": "wimse://trust.example.com/workload/payment-service"
   },
   "events": {
-    "https://schemas.openid.net/secevent/wise/event-type/workload-restored": {
+    "https://schemas.openid.net/secevent/wise/event-type/workload-trust-level-change": {
+      "trust_level": "full",
       "previous_trust_level": "restricted",
       "reason": "remediated",
       "event_timestamp": 1700003600
@@ -647,7 +636,28 @@ The following example is non-normative.
   }
 }
 ~~~
-{: #fig-workload-restored title="Example: Workload Restored"}
+{: #fig-workload-trust-level-change-restoration title="Example: Workload Trust Level Change (Restoration)"}
+
+~~~ json
+{
+  "iss": "https://authority.example.com/",
+  "jti": "wise-evt-015",
+  "iat": 1700007200,
+  "aud": "https://rp.partner.example.net/wise",
+  "sub_id": {
+    "format": "uri",
+    "uri": "wimse://trust.example.com/workload/payment-service"
+  },
+  "events": {
+    "https://schemas.openid.net/secevent/wise/event-type/workload-trust-level-change": {
+      "trust_level": "reduced",
+      "previous_trust_level": "unknown",
+      "event_timestamp": 1700007200
+    }
+  }
+}
+~~~
+{: #fig-workload-trust-level-change-unknown title="Example: Workload Trust Level Change (Unknown Previous Level)"}
 
 ### workload-purged
 
@@ -679,9 +689,9 @@ The following example is non-normative.
 ~~~
 {: #fig-workload-purged title="Example: Workload Purged"}
 
-## Trust and Federation Events
+## Trust and Policy Events
 
-These events signal changes to the trust material and federation relationships that federated peers and relying parties use to validate workload identity credentials from a trust domain.
+These events signal changes to trust material, federation relationships, and policies governing workload identity issuance, posture evaluation, and credential validation.
 
 Two related lifecycles are covered, each modeled with explicit create, update, and delete events. The trust anchors (keys and CAs) that validate a trust domain's credentials are managed through `trust-anchor-added`, `trust-anchor-rotated`, and `trust-anchor-revoked`. The federation relationship between trust domains, which determines whether one domain accepts credentials issued by another, is managed through `trust-domain-federation-established`, `trust-domain-federation-updated`, and `trust-domain-federation-revoked`. Replacing an entire trust bundle in a single operation is conveyed as the corresponding set of `trust-anchor-added` and `trust-anchor-revoked` events.
 
@@ -959,23 +969,23 @@ The following example is non-normative.
 ~~~
 {: #fig-federation-revoked title="Example: Trust Domain Federation Revoked"}
 
-## Policy and Posture Evaluation Events
+### policy-changed
 
-These events signal changes to the policies governing workload identity issuance, posture evaluation, and credential validation within or across trust domains.
+Event Type URI: `https://schemas.openid.net/secevent/wise/event-type/policy-changed`
 
-In the WIMSE model, posture evaluation is the process by which the Credential Service assesses a workload's runtime environment, software integrity, and deployment context before issuing or renewing credentials. This replaces the traditional notion of static attestation with a continuous evaluation model.
+The `policy-changed` event signals that a policy governing workload identity issuance, posture evaluation, or credential validation has changed. The REQUIRED `policy_type` claim identifies the category of policy that changed.
 
-### issuance-policy-changed
-
-Event Type URI: `https://schemas.openid.net/secevent/wise/event-type/issuance-policy-changed`
-
-The `issuance-policy-changed` event signals that the policy governing credential issuance for workloads has changed. This may affect which workloads are eligible for credentials, what credential types are issued, lifetime constraints, or required posture evidence.
+When `policy_type` is `issuance`, the change can affect workload eligibility, credential types, lifetime constraints, or required posture evidence. When `policy_type` is `posture_evaluation`, the change can affect required evidence, evaluation criteria, or deployment-context signals during credential issuance and renewal. When `policy_type` is `validation`, the change can affect trust-anchor validation, claim validation, audience restrictions, or acceptable credential types.
 
 Attributes:
 
+- **policy_type** - REQUIRED. A JSON string identifying the category of policy that changed. Possible values:
+    - `issuance` - The policy governing credential issuance for workloads.
+    - `posture_evaluation` - The policy governing posture evaluation during credential issuance or renewal.
+    - `validation` - The policy used by relying parties to validate workload identity credentials.
 - **policy_id** - OPTIONAL. Identifier of the policy that changed.
 
-The following example is non-normative.
+The following examples are non-normative.
 
 ~~~ json
 {
@@ -988,7 +998,8 @@ The following example is non-normative.
     "uri": "wimse://trust.example.com"
   },
   "events": {
-    "https://schemas.openid.net/secevent/wise/event-type/issuance-policy-changed": {
+    "https://schemas.openid.net/secevent/wise/event-type/policy-changed": {
+      "policy_type": "issuance",
       "policy_id": "policy:issuance-v3",
       "effective_at": 1700000000,
       "event_timestamp": 1700000000
@@ -996,19 +1007,7 @@ The following example is non-normative.
   }
 }
 ~~~
-{: #fig-issuance-policy-changed title="Example: Issuance Policy Changed"}
-
-### posture-evaluation-policy-changed
-
-Event Type URI: `https://schemas.openid.net/secevent/wise/event-type/posture-evaluation-policy-changed`
-
-The `posture-evaluation-policy-changed` event signals that the posture evaluation policy has changed. This may affect which evidence is required from workloads, what evaluation criteria apply, or what deployment context signals are considered during credential issuance and renewal.
-
-Attributes:
-
-- **policy_id** - OPTIONAL. Identifier of the policy that changed.
-
-The following example is non-normative.
+{: #fig-policy-changed-issuance title="Example: Policy Changed (Issuance)"}
 
 ~~~ json
 {
@@ -1021,7 +1020,8 @@ The following example is non-normative.
     "uri": "wimse://trust.example.com"
   },
   "events": {
-    "https://schemas.openid.net/secevent/wise/event-type/posture-evaluation-policy-changed": {
+    "https://schemas.openid.net/secevent/wise/event-type/policy-changed": {
+      "policy_type": "posture_evaluation",
       "policy_id": "policy:posture-eval-v2",
       "effective_at": 1700000000,
       "event_timestamp": 1700000000
@@ -1029,19 +1029,7 @@ The following example is non-normative.
   }
 }
 ~~~
-{: #fig-posture-evaluation-policy-changed title="Example: Posture Evaluation Policy Changed"}
-
-### validation-policy-changed
-
-Event Type URI: `https://schemas.openid.net/secevent/wise/event-type/validation-policy-changed`
-
-The `validation-policy-changed` event signals that the policy used to validate workload identity credentials at relying parties has changed. This includes changes to trust anchor validation rules, claim validation requirements, audience restrictions, or acceptable credential types.
-
-Attributes:
-
-- **policy_id** - OPTIONAL. Identifier of the policy that changed.
-
-The following example is non-normative.
+{: #fig-policy-changed-posture-evaluation title="Example: Policy Changed (Posture Evaluation)"}
 
 ~~~ json
 {
@@ -1054,7 +1042,8 @@ The following example is non-normative.
     "uri": "wimse://trust.example.com"
   },
   "events": {
-    "https://schemas.openid.net/secevent/wise/event-type/validation-policy-changed": {
+    "https://schemas.openid.net/secevent/wise/event-type/policy-changed": {
+      "policy_type": "validation",
       "policy_id": "policy:validation-v5",
       "effective_at": 1700000000,
       "event_timestamp": 1700000000
@@ -1062,30 +1051,37 @@ The following example is non-normative.
   }
 }
 ~~~
-{: #fig-validation-policy-changed title="Example: Validation Policy Changed"}
+{: #fig-policy-changed-validation title="Example: Policy Changed (Validation)"}
 
-### posture-evaluation-failed
+## Posture and Runtime Events
 
-Event Type URI: `https://schemas.openid.net/secevent/wise/event-type/posture-evaluation-failed`
+### posture-evaluated
 
-The `posture-evaluation-failed` event signals that a workload did not pass posture evaluation. The Credential Service determined that the workload's runtime environment, software integrity, or deployment context did not meet the requirements for credential issuance.
+Event Type URI: `https://schemas.openid.net/secevent/wise/event-type/posture-evaluated`
 
-Posture evaluation is a security-critical checkpoint, so its failure warrants a dedicated event rather than being buried inside another outcome. It may occur at initial issuance, at renewal, or during continuous re-evaluation, and this event reports the posture failure itself independently of any particular credential operation. A posture failure does not necessarily cause a `credential-renewal-failure` (for example, it may occur outside a renewal), and a `credential-renewal-failure` may occur for reasons unrelated to posture. When a renewal fails because of posture evaluation, the two events are emitted together and correlated using the `txn` claim (see {{correlating-related-events}}).
+The `posture-evaluated` event signals that a workload posture evaluation completed. The REQUIRED `result` claim indicates whether the workload passed or failed the evaluation. The Credential Service evaluates the workload's runtime environment, software integrity, or deployment context against the applicable requirements.
+
+Posture evaluation may occur during initial issuance, renewal, or continuous re-evaluation, and this event reports the outcome independently of any particular credential operation. A `failed` result is a security-critical signal in its own right and does not necessarily cause credential rotation to fail; conversely, `credential-rotated` with `status` set to `failed` may occur for reasons unrelated to posture. When posture evaluation causes a rotation or renewal attempt to fail, the events are emitted and correlated as described in {{credential-rotated}}.
+
+A `succeeded` result does not imply that a prior failure occurred. It confirms that the workload met the evaluated requirements but does not by itself assert that a credential was issued. A related `credential-rotated` event with `status` set to `succeeded` reports successful replacement issuance.
 
 Attributes:
 
-- **evaluation_type** - OPTIONAL. The scope of evaluation that failed. Possible values:
+- **result** - REQUIRED. A JSON string indicating the outcome of the posture evaluation. Possible values:
+    - `failed` - The workload did not pass posture evaluation.
+    - `succeeded` - The workload passed posture evaluation.
+- **evaluation_type** - OPTIONAL. The scope of the evaluation. Possible values:
     - `platform` - Platform-level evaluation (e.g., node integrity, TEE verification).
     - `workload` - Workload-level evaluation (e.g., binary identity, image hash).
     - `runtime` - Runtime environment evaluation (e.g., configuration compliance, network posture).
-- **reason** - OPTIONAL. Why the evaluation failed. Possible values:
+- **reason** - OPTIONAL. Why the evaluation failed. This claim MAY be included only when `result` is `failed` and MUST be omitted when `result` is `succeeded`. Possible values:
     - `platform_integrity_failed` - Platform integrity or TEE verification did not pass.
     - `attestation_invalid` - Attestation evidence was missing, malformed, or could not be verified.
     - `image_mismatch` - The workload's binary or image did not match the expected measurement.
     - `configuration_noncompliant` - The runtime configuration did not meet policy.
     - `policy_denied` - Posture evaluation policy denied the workload.
 
-The following example is non-normative.
+The following examples are non-normative.
 
 ~~~ json
 {
@@ -1093,12 +1089,14 @@ The following example is non-normative.
   "jti": "wise-evt-053",
   "iat": 1700000000,
   "aud": "https://rp.partner.example.net/wise",
+  "txn": "wise-txn-005",
   "sub_id": {
     "format": "uri",
     "uri": "wimse://trust.example.com/workload/payment-service"
   },
   "events": {
-    "https://schemas.openid.net/secevent/wise/event-type/posture-evaluation-failed": {
+    "https://schemas.openid.net/secevent/wise/event-type/posture-evaluated": {
+      "result": "failed",
       "evaluation_type": "platform",
       "reason": "platform_integrity_failed",
       "event_timestamp": 1700000000
@@ -1106,21 +1104,7 @@ The following example is non-normative.
   }
 }
 ~~~
-{: #fig-posture-evaluation-failed title="Example: Posture Evaluation Failed"}
-
-### posture-evaluation-succeeded
-
-Event Type URI: `https://schemas.openid.net/secevent/wise/event-type/posture-evaluation-succeeded`
-
-The `posture-evaluation-succeeded` event signals that a workload successfully passed posture evaluation. This event is produced as part of the regular credential provisioning process. It confirms that the workload met the Credential Service's requirements and that a credential was or will be issued.
-
-This event does not imply that a prior failure occurred. It is generated each time posture evaluation completes successfully, providing an audit trail and enabling downstream systems to track the health of the provisioning pipeline.
-
-Attributes:
-
-- **evaluation_type** - OPTIONAL. The scope of evaluation that succeeded.
-
-The following example is non-normative.
+{: #fig-posture-evaluated-failed title="Example: Posture Evaluated (Failed)"}
 
 ~~~ json
 {
@@ -1133,31 +1117,28 @@ The following example is non-normative.
     "uri": "wimse://trust.example.com/workload/payment-service"
   },
   "events": {
-    "https://schemas.openid.net/secevent/wise/event-type/posture-evaluation-succeeded": {
+    "https://schemas.openid.net/secevent/wise/event-type/posture-evaluated": {
+      "result": "succeeded",
       "evaluation_type": "workload",
       "event_timestamp": 1700000000
     }
   }
 }
 ~~~
-{: #fig-posture-evaluation-succeeded title="Example: Posture Evaluation Succeeded"}
+{: #fig-posture-evaluated-succeeded title="Example: Posture Evaluated (Succeeded)"}
 
-## Runtime Posture Events
+### workload-execution-environment-changed
 
-### workload-baseline-changed
+Event Type URI: `https://schemas.openid.net/secevent/wise/event-type/workload-execution-environment-changed`
 
-Event Type URI: `https://schemas.openid.net/secevent/wise/event-type/workload-baseline-changed`
-
-The `workload-baseline-changed` event signals that a workload's runtime environment, deployment context, or metadata has changed. This may trigger re-evaluation of trust by relying parties or require the workload to undergo posture evaluation before new credentials are issued.
+The `workload-execution-environment-changed` event signals that a workload's runtime environment or deployment context has changed. This may trigger re-evaluation of trust by relying parties or require the workload to undergo posture evaluation before new credentials are issued.
 
 Attributes:
 
-- **reason** - OPTIONAL. Why the baseline changed. Possible values:
+- **reason** - OPTIONAL. Why the workload execution environment changed. Possible values:
     - `migration` - Workload moved to a different node, region, or zone.
     - `scaling` - New instances added or removed.
     - `redeployment` - Workload was redeployed (same identity, new instance).
-    - `image_update` - Runtime image or binary was updated.
-    - `config_change` - Configuration affecting identity posture changed.
     - `node_reassignment` - Underlying compute node changed.
 - **previous_context** - OPTIONAL. A JSON object describing the prior runtime environment. See the guidance below on the interoperable key set and on limiting sensitive detail.
 - **current_context** - OPTIONAL. A JSON object describing the new runtime environment, using the same keys as `previous_context` so the two can be compared.
@@ -1191,7 +1172,7 @@ The following example is non-normative.
     "uri": "wimse://trust.example.com/workload/payment-service"
   },
   "events": {
-    "https://schemas.openid.net/secevent/wise/event-type/workload-baseline-changed": {
+    "https://schemas.openid.net/secevent/wise/event-type/workload-execution-environment-changed": {
       "reason": "migration",
       "previous_context": {
         "region": "us-east-1",
@@ -1207,7 +1188,7 @@ The following example is non-normative.
   }
 }
 ~~~
-{: #fig-baseline-changed title="Example: Workload Baseline Changed (Migration)"}
+{: #fig-execution-environment-changed title="Example: Workload Execution Environment Changed (Migration)"}
 
 ### workload-compromised
 
@@ -1421,7 +1402,7 @@ The following example is non-normative.
 
 ## Trust Domain Subject
 
-For events that apply to an entire trust domain rather than to a single workload — the `trust-anchor-*` and `trust-domain-federation-*` events, and the policy events (`issuance-policy-changed`, `posture-evaluation-policy-changed`, `validation-policy-changed`) — the `sub_id` identifies the trust domain itself using its Workload Identifier Origin as defined in {{WIMSE-ID}}:
+For events that apply to an entire trust domain rather than to a single workload — the `trust-anchor-*` and `trust-domain-federation-*` events, and the `policy-changed` event — the `sub_id` identifies the trust domain itself using its Workload Identifier Origin as defined in {{WIMSE-ID}}:
 
 The following example is non-normative.
 
@@ -1472,7 +1453,7 @@ Supply chain events are advisory inputs to a Receiver's own decision-making. A R
 
 WISE events may reveal information about internal infrastructure, deployment patterns, scaling behavior, and security incidents. Transmitters SHOULD minimize the information disclosed to what is necessary for the Receiver to take appropriate action.
 
-Several fields in this specification carry free-form or descriptive values — for example `key_storage_ecosystem` on `credential-issued`, and `previous_context` / `current_context` on `workload-baseline-changed`. Such fields can inadvertently disclose fine-grained infrastructure or device detail, such as node or host names, IP addresses, internal network identifiers, device models, or software versions. For any such field, a Transmitter SHOULD avoid including detail beyond what the Receiver needs, based on its own evaluation of the privacy risk, particularly for events that may cross a trust-domain boundary. For example, a coarse `region` is preferable to a specific node or host name.
+Several fields in this specification carry free-form or descriptive values — for example `key_storage_ecosystem` on `credential-issued`, and `previous_context` / `current_context` on `workload-execution-environment-changed`. Such fields can inadvertently disclose fine-grained infrastructure or device detail, such as node or host names, IP addresses, internal network identifiers, device models, or software versions. For any such field, a Transmitter SHOULD avoid including detail beyond what the Receiver needs, based on its own evaluation of the privacy risk, particularly for events that may cross a trust-domain boundary. For example, a coarse `region` is preferable to a specific node or host name.
 
 Events SHOULD NOT include personally identifiable information. Workload identifiers SHOULD NOT encode information about the humans who manage or operate the workloads.
 
@@ -1515,7 +1496,7 @@ Event Type:
 : `credential-rotated`
 
 Description:
-: A workload's credential was rotated.
+: A workload credential rotation completed, indicating whether it succeeded or failed.
 
 Event Type:
 : `credential-revoked`
@@ -1530,12 +1511,6 @@ Description:
 : A workload credential is believed to be compromised.
 
 Event Type:
-: `credential-renewal-failure`
-
-Description:
-: Renewal of a workload's credential failed.
-
-Event Type:
 : `workload-disabled`
 
 Description:
@@ -1545,7 +1520,7 @@ Event Type:
 : `workload-enabled`
 
 Description:
-: A previously disabled workload is active again.
+: A workload entered the active state, either initially or after being re-enabled.
 
 Event Type:
 : `workload-purged`
@@ -1554,16 +1529,10 @@ Description:
 : A workload was permanently removed from the trust domain.
 
 Event Type:
-: `workload-degraded`
+: `workload-trust-level-change`
 
 Description:
-: A workload's trust level was intentionally reduced without suspending it.
-
-Event Type:
-: `workload-restored`
-
-Description:
-: A previously degraded workload was returned to full trust.
+: A workload's graduated trust level changed without suspending it.
 
 Event Type:
 : `trust-anchor-added`
@@ -1602,37 +1571,19 @@ Description:
 : A previously federated trust domain is no longer trusted.
 
 Event Type:
-: `issuance-policy-changed`
+: `policy-changed`
 
 Description:
-: The credential issuance policy changed.
+: A workload identity issuance, posture evaluation, or credential validation policy changed.
 
 Event Type:
-: `posture-evaluation-policy-changed`
+: `posture-evaluated`
 
 Description:
-: The posture evaluation policy changed.
+: A workload posture evaluation completed, indicating whether the workload passed or failed.
 
 Event Type:
-: `validation-policy-changed`
-
-Description:
-: The credential validation policy changed.
-
-Event Type:
-: `posture-evaluation-failed`
-
-Description:
-: A workload did not pass posture evaluation.
-
-Event Type:
-: `posture-evaluation-succeeded`
-
-Description:
-: A workload passed posture evaluation.
-
-Event Type:
-: `workload-baseline-changed`
+: `workload-execution-environment-changed`
 
 Description:
 : A workload's runtime environment or deployment context changed.
@@ -1679,6 +1630,18 @@ The authors want to recognize the contributions and reviews of the following ind
 
 # Document History
 {:numbered="false"}
+
+-04
+
+- Broadened `workload-enabled` to represent a workload entering the active state either when newly instantiated or started, or when re-enabled after being disabled; Receivers must not assume a prior disabled state.
+- Folded `credential-renewal-failure` into `credential-rotated`, which now carries a REQUIRED `status` of `succeeded` or `failed`; retained success-only replacement fields and failure-only `credential_id`, `current_expiry`, and `failure_reason`, and removed the separate IANA registration.
+- Replaced `workload-degraded` and `workload-restored` with a single `workload-trust-level-change` event carrying REQUIRED `trust_level` and `previous_trust_level` claims; added `full` to the current-level scale and `unknown` for an unavailable previous level, retained advisory semantics and direction-appropriate reasons, and replaced the two IANA registrations with one.
+- Replaced `issuance-policy-changed`, `posture-evaluation-policy-changed`, and `validation-policy-changed` with a single `policy-changed` event carrying a REQUIRED `policy_type` of `issuance`, `posture_evaluation`, or `validation`; retained the OPTIONAL `policy_id`, common timing claims, trust-domain subject, examples for all three policy categories, and matching IANA registration.
+- Replaced `posture-evaluation-failed` and `posture-evaluation-succeeded` with a single `posture-evaluated` event under "Posture and Runtime Events", carrying a REQUIRED `result` of `failed` or `succeeded`; retained the failure-only `reason` enum and clarified its correlation with failed `credential-rotated` events.
+- Renamed the "Trust and Federation Events" section to "Trust and Policy Events", moved `policy-changed` into it, and removed the now-empty "Policy Evaluation Events" section.
+- Renamed the "Runtime Posture Events" section to "Posture and Runtime Events".
+- Renamed `workload-baseline-changed` to `workload-execution-environment-changed` to clarify that the event signals a change to a workload's runtime execution environment or deployment context.
+- Removed the `image_update` and `config_change` reasons from `workload-execution-environment-changed` and removed metadata changes from the event's scope.
 
 -03
 

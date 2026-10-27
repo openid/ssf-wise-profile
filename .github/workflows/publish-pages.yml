@@ -1,0 +1,135 @@
+name: Publish Branch Previews
+
+on:
+  # workflow_run executes this workflow from the trusted default branch after
+  # a read-only build succeeds on main, a branch, or a same-repository PR.
+  workflow_run:
+    workflows: ["Build Spec"]
+    types: [completed]
+  delete:
+  workflow_dispatch:
+  schedule:
+    # Reconcile previews for older branches that have not inherited build.yml.
+    - cron: '17 3 * * *'
+
+permissions:
+  contents: read
+
+# Each deployment replaces the complete Pages site, so deploy only the newest
+# aggregate snapshot of main and all current branches.
+concurrency:
+  group: pages-${{ github.repository }}
+  cancel-in-progress: true
+
+jobs:
+  build-pages:
+    if: >-
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository) ||
+      (github.event_name == 'delete' && github.event.ref_type == 'branch') ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: gem install kramdown-rfc
+      - run: pip install xml2rfc
+
+      - name: Fetch current branches
+        run: git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
+
+      - name: Build main and branch previews
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          site_dir="${RUNNER_TEMP}/pages"
+          worktree_root="${RUNNER_TEMP}/wise-worktrees"
+          mkdir -p "${site_dir}" "${worktree_root}"
+
+          build_ref() {
+            local branch="$1"
+            local ref="$2"
+            local destination="$3"
+            local sequence="$4"
+            local worktree="${worktree_root}/${sequence}"
+
+            git worktree add --detach "${worktree}" "${ref}"
+
+            if [[ ! -f "${worktree}/openid-wise-profile-1_0.md" ]]; then
+              echo "::warning::Skipping ${branch}: openid-wise-profile-1_0.md is absent"
+              git worktree remove --force "${worktree}"
+              return 1
+            fi
+
+            mkdir -p "${worktree}/build"
+            if ! (
+              cd "${worktree}"
+              kramdown-rfc2629 openid-wise-profile-1_0.md > build/openid-wise-profile-1_0.xml
+              xml2rfc build/openid-wise-profile-1_0.xml --html -o build/openid-wise-profile-1_0.html
+            ); then
+              echo "::warning::Skipping ${branch}: specification build failed"
+              git worktree remove --force "${worktree}"
+              return 1
+            fi
+
+            mkdir -p "${destination}"
+            cp "${worktree}/build/openid-wise-profile-1_0.html" "${destination}/index.html"
+            git worktree remove --force "${worktree}"
+          }
+
+          # GitHub mounts this artifact root at:
+          # https://openid.github.io/ssf-wise-profile/
+          build_ref "main" "refs/remotes/origin/main" "${site_dir}" "000-main"
+
+          sequence=0
+          while IFS= read -r ref; do
+            branch="${ref#refs/remotes/origin/}"
+            [[ "${branch}" == "main" || "${branch}" == "HEAD" ]] && continue
+
+            # Keep branch paths inside the Pages artifact. A slash in a valid
+            # branch name naturally creates nested URL path components.
+            if [[ "${branch}" == /* || "${branch}" == */ || "${branch}" == *..* || "${branch}" == "index.html" || "${branch}" == index.html/* ]]; then
+              echo "::warning::Skipping ${branch}: unsafe or reserved preview path"
+              continue
+            fi
+
+            sequence=$((sequence + 1))
+            if build_ref "${branch}" "${ref}" "${site_dir}/${branch}" "$(printf '%03d' "${sequence}")"; then
+              echo "Published preview: https://openid.github.io/ssf-wise-profile/${branch}/"
+            fi
+          done < <(git for-each-ref --format='%(refname)' refs/remotes/origin)
+
+          touch "${site_dir}/.nojekyll"
+
+      - name: Upload aggregate Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/pages
+
+  deploy:
+    needs: build-pages
+    if: >-
+      needs.build-pages.result == 'success' &&
+      github.repository == 'openid/ssf-wise-profile'
+    permissions:
+      pages: write
+      id-token: write
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy aggregate Pages site
+        id: deployment
+        uses: actions/deploy-pages@v4

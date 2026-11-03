@@ -1,27 +1,81 @@
-name: Build Spec
+name: publish
 
 on:
-  pull_request:
-    branches: [main]
   push:
-    branches:
-      - '**'
+    branches: [ main ]
+    paths-ignore:
+      - README.md
+      - AGENTS.md
+      - LICENSE
+      - '.github/**'
+      - Makefile
+      - .gitignore
+  pull_request:
+    branches: [ main ]
+    paths-ignore:
+      - README.md
+      - AGENTS.md
+      - LICENSE
+      - '.github/**'
+      - Makefile
+      - .gitignore
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  build:
+  build-wise:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ruby/setup-ruby@v1
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.2'
+          ruby-version: '3.3'
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: gem install kramdown-rfc
-      - run: pip install xml2rfc
-      - name: Build specification
-        run: make publish
+      - name: Install kramdown-rfc
+        run: gem install kramdown-rfc
+      - name: Install xml2rfc
+        run: pip install xml2rfc
+      - name: Convert WISE md to xml
+        run: kramdown-rfc2629 openid-wise-profile-1_0.md > openid-wise-profile-1_0.xml
+      - name: Render WISE html
+        run: xml2rfc openid-wise-profile-1_0.xml --html -o openid-wise-profile-1_0.html
+      - name: Render WISE text
+        run: xml2rfc openid-wise-profile-1_0.xml --text -o openid-wise-profile-1_0.txt
+      - name: Add index.html for site root
+        run: cp openid-wise-profile-1_0.html index.html
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: specfiles
+          path: |
+            index.html
+            openid-wise-profile-1_0.html
+            openid-wise-profile-1_0.txt
+
+  publish-to-pages:
+    if: github.ref == 'refs/heads/main'
+    needs: [build-wise]
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: specfiles
+      - name: Upload pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

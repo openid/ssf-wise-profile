@@ -1676,6 +1676,7 @@ The authors want to recognize the contributions and reviews of the following ind
 - Tom Sato
 
 # Notices
+{:numbered="false"}
 
 Copyright (c) 2026 The OpenID Foundation.
 

@@ -1,20 +1,18 @@
 ---
-stand_alone: true
-ipr: none
-cat: std # Check
-submissiontype: IETF
-wg: OpenID Shared Signals
-
-docname: openid-wise-profile-1_0
-
 title: "OpenID WISE Profile Specification 1.0 - draft 03"
-abbrev: wiseset
-lang: en
-kw:
- - security events
- - workload identity
- - shared signals
- - SET
+abbrev: wise-profile
+docname: ssf-wise-profile-1_0
+
+ipr: none
+cat: std
+wg: Shared Signals
+
+coding: us-ascii
+pi:
+  toc: yes
+  sortrefs: yes
+  symrefs: yes
+  private: yes
 
 author:
 - ins: J. Lombardo

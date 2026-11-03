@@ -2,64 +2,131 @@ name: publish
 
 on:
   push:
-    branches: [ main ]
+    branches: ['**']
     paths-ignore:
       - README.md
       - AGENTS.md
-      - LICENSE
-      - '.github/**'
-      - Makefile
       - .gitignore
   pull_request:
-    branches: [ main ]
-    paths-ignore:
-      - README.md
-      - AGENTS.md
-      - LICENSE
-      - '.github/**'
-      - Makefile
-      - .gitignore
+    branches: [main]
+  delete:            # rebuild the site so a deleted branch's preview goes away
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# Each deploy replaces the full Pages site, so only the newest run matters
+concurrency:
+  group: pages-${{ github.repository }}
+  cancel-in-progress: true
+
 jobs:
-  build-wise:
+  # 1. Build the ref that triggered the run (PRs included) and keep the files
+  build:
+    if: github.event_name != 'delete'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Ruby
-        uses: ruby/setup-ruby@v1
+      - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.3'
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install kramdown-rfc
-        run: gem install kramdown-rfc
-      - name: Install xml2rfc
-        run: pip install xml2rfc
-      - name: Convert WISE md to xml
-        run: kramdown-rfc2629 openid-wise-profile-1_0.md > openid-wise-profile-1_0.xml
-      - name: Render WISE html
-        run: xml2rfc openid-wise-profile-1_0.xml --html -o openid-wise-profile-1_0.html
-      - name: Render WISE text
-        run: xml2rfc openid-wise-profile-1_0.xml --text -o openid-wise-profile-1_0.txt
-      - name: Add index.html for site root
-        run: cp openid-wise-profile-1_0.html index.html
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Install tools
+        run: |
+          gem install kramdown-rfc
+          pip install xml2rfc
+          sudo apt-get update && sudo apt-get install -y pandoc
+      - name: Build specification
+        run: |
+          mkdir -p build
+          kramdown-rfc2629 openid-wise-profile-1_0.md > build/openid-wise-profile-1_0.xml
+          xml2rfc build/openid-wise-profile-1_0.xml --html -o build/openid-wise-profile-1_0.html
+          xml2rfc build/openid-wise-profile-1_0.xml --text -o build/openid-wise-profile-1_0.txt
+          pandoc build/openid-wise-profile-1_0.html -f html -t docx -o build/openid-wise-profile-1_0.docx
+      - uses: actions/upload-artifact@v4
         with:
           name: specfiles
-          path: |
-            index.html
-            openid-wise-profile-1_0.html
-            openid-wise-profile-1_0.txt
+          path: build/
 
-  publish-to-pages:
-    if: github.ref == 'refs/heads/main'
-    needs: [build-wise]
+  # 2. Rebuild main + every branch into one Pages site
+  build-pages:
+    needs: build
+    if: >-
+      always() &&
+      github.event_name != 'pull_request' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install tools
+        run: |
+          gem install kramdown-rfc
+          pip install xml2rfc
+          sudo apt-get update && sudo apt-get install -y pandoc
+      - name: Fetch all branches
+        run: git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
+      - name: Build main and branch previews
+        shell: bash
+        run: |
+          set -euo pipefail
+          site="${RUNNER_TEMP}/pages"
+          wt_root="${RUNNER_TEMP}/wt"
+          mkdir -p "$site" "$wt_root"
+          n=0
+
+          build_ref() {   # \$1=branch  \$2=ref  \$3=destination
+            local wt="${wt_root}/$((n++))"
+            git worktree add --detach "$wt" "\$2"
+            if [[ ! -f "$wt/openid-wise-profile-1_0.md" ]]; then
+              echo "::warning::Skipping \$1: no spec file"; git worktree remove --force "$wt"; return 1
+            fi
+            if ! ( cd "$wt"
+                   mkdir -p build
+                   kramdown-rfc2629 openid-wise-profile-1_0.md > build/openid-wise-profile-1_0.xml
+                   xml2rfc build/openid-wise-profile-1_0.xml --html -o build/openid-wise-profile-1_0.html
+                   xml2rfc build/openid-wise-profile-1_0.xml --text -o build/openid-wise-profile-1_0.txt
+                   pandoc build/openid-wise-profile-1_0.html -f html -t docx -o build/openid-wise-profile-1_0.docx ); then
+              echo "::warning::Skipping \$1: build failed"; git worktree remove --force "$wt"; return 1
+            fi
+            mkdir -p "\$3"
+            cp "$wt"/build/openid-wise-profile-1_0.{html,txt,docx} "\$3/"
+            cp "$wt/build/openid-wise-profile-1_0.html" "\$3/index.html"
+            git worktree remove --force "$wt"
+          }
+
+          # main -> site root
+          build_ref main refs/remotes/origin/main "$site" || true
+
+          # each branch -> /<branch>/
+          for ref in $(git for-each-ref --format='%(refname)' refs/remotes/origin); do
+            branch="${ref#refs/remotes/origin/}"
+            [[ "$branch" == main || "$branch" == HEAD ]] && continue
+            if [[ "$branch" == *..* || "$branch" == index.html* || "$branch" == openid-wise-profile-1_0* ]]; then
+              echo "::warning::Skipping $branch: unsafe or reserved path"; continue
+            fi
+            build_ref "$branch" "$ref" "$site/$branch" \
+              && echo "Preview: https://openid.github.io/ssf-wise-profile/$branch/" || true
+          done
+
+          touch "$site/.nojekyll"
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/pages
+
+  # 3. Deploy
+  deploy:
+    needs: build-pages
+    if: always() && needs.build-pages.result == 'success' && github.repository == 'openid/ssf-wise-profile'
     runs-on: ubuntu-latest
     permissions:
       pages: write
@@ -68,14 +135,5 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Download artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: specfiles
-      - name: Upload pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: .
-      - name: Deploy to GitHub Pages
-        id: deployment
+      - id: deployment
         uses: actions/deploy-pages@v4
